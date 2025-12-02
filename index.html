@@ -62,7 +62,7 @@
                         <option value="standard">Standard Z-Score (Fragile)</option>
                     </select>
                     <p class="text-xs text-slate-500 mt-2" id="methodDesc">
-                        Uses <strong>Median & MAD</strong>. Highly resistant to "Whales." Ideal for messy real-world data.
+                        Uses <strong>Median & MAD</strong> calculated from the <strong>Current View</strong>.
                     </p>
                 </div>
 
@@ -124,7 +124,10 @@
                         <span class="text-sm text-slate-400">End Date: <span id="dateEndDisplay" class="text-white font-mono"></span></span>
                     </div>
                     <div id="dateSlider" class="slider-styled mt-2 mb-4"></div>
-                    <p class="text-xs text-center text-slate-500">Drag handles to zoom into specific time periods</p>
+                    <p class="text-xs text-center text-slate-500">
+                        <span class="text-blue-400 font-bold">New Logic:</span> Dragging these handles will Recalculate Anomaly Scores based on the 
+                        <span class="text-blue-400 font-bold">visible data only</span>.
+                    </p>
                 </div>
 
             </div>
@@ -216,9 +219,7 @@
                 allData[randomIndex].isAnomaly = true;
             }
 
-            // C. Inject Small "Burnt Toast" Anomalies (NEW)
-            // These are fixed at 4-6x size to sit right on the threshold line.
-            // These demonstrate the masking effect best.
+            // C. Inject Small "Burnt Toast" Anomalies
             const smallAnomalyCount = 10;
             for (let j = 0; j < smallAnomalyCount; j++) {
                 const randomIndex = Math.floor(Math.random() * TOTAL_DAYS);
@@ -228,28 +229,38 @@
                 allData[randomIndex].y += (BASE_NOISE * multiplier * direction);
             }
 
-            // After generating raw numbers, calculate the scores immediately
-            applyDetectionMethod();
+            // Initial math calc on full range
+            // We use a timeout to ensure chart is ready
+            setTimeout(() => {
+                recalculateScoresOnWindow(0, TOTAL_DAYS);
+            }, 100);
         }
 
-        // 2. Apply Detection Logic (Runs on existing data)
-        function applyDetectionMethod() {
+        // 2. Recalculate Scores based on a specific WINDOW (Slider)
+        function recalculateScoresOnWindow(startIndex, endIndex) {
             const method = document.getElementById('detectionMethod').value;
             const threshold = parseFloat(document.getElementById('zThreshold').value);
-            const values = allData.map(d => d.y);
+            
+            // 1. Isolate the "View Window" data
+            // We only look at stats for the currently visible points
+            const windowDataPoints = allData.slice(startIndex, endIndex);
+            const windowValues = windowDataPoints.map(d => d.y);
             
             let stats = {};
 
+            // 2. Calculate Stats ONLY for this window
             if (method === 'standard') {
-                stats.mean = getMean(values);
-                stats.stdDev = getStdDev(values, stats.mean);
+                stats.mean = getMean(windowValues);
+                stats.stdDev = getStdDev(windowValues, stats.mean);
             } else {
-                stats.median = getMedian(values);
-                stats.mad = getMAD(values, stats.median);
+                stats.median = getMedian(windowValues);
+                stats.mad = getMAD(windowValues, stats.median);
                 stats.constant = 0.6745;
             }
 
-            allData.forEach(point => {
+            // 3. Apply Scores to the window data
+            // Note: We also update the global array, but only the visible ones "matter" visually
+            windowDataPoints.forEach(point => {
                 let score = 0;
 
                 if (method === 'standard') {
@@ -262,24 +273,15 @@
                     }
                 }
 
-                // Store the score
                 point.zScore = Math.abs(score); 
-                // Color Logic
                 point.color = point.zScore > threshold ? '#ef4444' : '#3b82f6';
             });
 
-            // Update chart without regenerating slider
+            // 4. Update the Chart
             if(chartInstance) {
-                // Check if slider is initialized before accessing it
-                if (dateSlider && dateSlider.noUiSlider) {
-                    const sliderRange = dateSlider.noUiSlider.get();
-                    if(sliderRange) {
-                        updateChart(Math.round(sliderRange[0]), Math.round(sliderRange[1]));
-                    }
-                } else {
-                    // If slider not ready (initial load), show full range
-                    updateChart(0, allData.length);
-                }
+                // We only render the window data
+                chartInstance.data.datasets[0].data = windowDataPoints;
+                chartInstance.update();
             }
         }
 
@@ -345,12 +347,6 @@
             });
         }
 
-        function updateChart(startIndex, endIndex) {
-            const slicedData = allData.slice(startIndex, endIndex);
-            chartInstance.data.datasets[0].data = slicedData;
-            chartInstance.update();
-        }
-
         // --- SLIDER LOGIC ---
         function initSlider() {
             noUiSlider.create(dateSlider, {
@@ -365,13 +361,20 @@
                 const startIndex = Math.round(values[0]);
                 const endIndex = Math.round(values[1]);
                 
+                // Update text
                 if(allData.length > 0) {
-                    const startTs = allData[Math.min(startIndex, allData.length-1)].x;
-                    const endTs = allData[Math.min(endIndex, allData.length-1) || 0].x; 
+                    const safeEnd = Math.min(endIndex, allData.length - 1) || 0;
+                    const safeStart = Math.min(startIndex, allData.length - 1);
+
+                    const startTs = allData[safeStart].x;
+                    const endTs = allData[safeEnd].x; 
                     document.getElementById('dateStartDisplay').innerText = new Date(startTs).toLocaleDateString();
                     document.getElementById('dateEndDisplay').innerText = new Date(endTs).toLocaleDateString();
                 }
-                updateChart(startIndex, endIndex);
+
+                // TRIGGER RECALCULATION ON ZOOM
+                // This makes the anomaly detection "Context Aware" of the slider range
+                recalculateScoresOnWindow(startIndex, endIndex);
             });
         }
 
@@ -385,29 +388,33 @@
         document.getElementById('detectionMethod').addEventListener('change', (e) => {
             const desc = document.getElementById('methodDesc');
             if(e.target.value === 'standard') {
-                desc.innerHTML = `Uses <strong>Mean & StdDev</strong>. <span class="text-red-400">Warning:</span> A large "Whale" will inflate the StdDev, causing smaller anomalies to be ignored (False Negatives).`;
+                desc.innerHTML = `Uses <strong>Mean & StdDev</strong>. <span class="text-red-400">Warning:</span> A large "Whale" will inflate the StdDev, causing smaller anomalies to be ignored.`;
             } else {
-                desc.innerHTML = `Uses <strong>Median & MAD</strong>. Highly resistant to "Whales." Ideal for messy real-world data.`;
+                desc.innerHTML = `Uses <strong>Median & MAD</strong> calculated from the <strong>Current View</strong>.`;
             }
-            // Just apply the math to existing data, do NOT regenerate raw values
-            applyDetectionMethod();
+            // Trigger update based on current slider position
+            if (dateSlider && dateSlider.noUiSlider) {
+                const sliderRange = dateSlider.noUiSlider.get();
+                recalculateScoresOnWindow(Math.round(sliderRange[0]), Math.round(sliderRange[1]));
+            }
         });
 
         // Regenerate everything (New Data + New Math)
         document.getElementById('regenerateBtn').addEventListener('click', () => {
             generateRawData();
-            // Reset visual slider position only on hard regenerate if desired, 
-            // but usually keeping current zoom is nicer. We'll refresh chart via the loop.
         });
         
-        // Threshold Update (Just re-apply math/color)
+        // Threshold Update
         document.getElementById('zThreshold').addEventListener('input', () => {
-            applyDetectionMethod();
+            if (dateSlider && dateSlider.noUiSlider) {
+                const sliderRange = dateSlider.noUiSlider.get();
+                recalculateScoresOnWindow(Math.round(sliderRange[0]), Math.round(sliderRange[1]));
+            }
         });
 
         // --- INITIALIZATION ---
         initChart();
-        generateRawData(); // This also calls applyDetectionMethod()
+        generateRawData();
         initSlider();
 
     </script>
