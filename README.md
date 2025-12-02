@@ -56,4 +56,4 @@ Here is a breakdown of the interactive controls available in the playground:
 * noUiSlider (Range Selection)
 * Tailwind CSS (Styling)
 
---
+---
