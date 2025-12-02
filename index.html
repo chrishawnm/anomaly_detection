@@ -54,6 +54,18 @@
             <div class="bg-slate-800 p-6 rounded-lg shadow-lg h-fit">
                 <h2 class="text-xl font-semibold mb-4 text-white">Generators</h2>
                 
+                <!-- Method Selector (NEW) -->
+                <div class="mb-6 border-b border-slate-700 pb-6">
+                    <label class="block text-sm font-bold mb-2 text-yellow-400">Detection Method</label>
+                    <select id="detectionMethod" class="w-full bg-slate-700 border border-slate-600 rounded px-2 py-2 text-white cursor-pointer hover:bg-slate-600 transition">
+                        <option value="modified">Modified Z-Score (Robust)</option>
+                        <option value="standard">Standard Z-Score (Fragile)</option>
+                    </select>
+                    <p class="text-xs text-slate-500 mt-2" id="methodDesc">
+                        Uses <strong>Median & MAD</strong>. Highly resistant to "Whales." Ideal for messy real-world data.
+                    </p>
+                </div>
+
                 <!-- Trend Control -->
                 <div class="mb-6">
                     <label class="block text-sm font-medium mb-2 text-slate-300">Yearly Growth Trend (%)</label>
@@ -85,7 +97,7 @@
 
                 <!-- Detection Threshold (Visual Only) -->
                 <div class="mb-6 border-t border-slate-600 pt-4">
-                    <label class="block text-sm font-medium mb-2 text-green-300">Modified Z-Score Threshold</label>
+                    <label class="block text-sm font-medium mb-2 text-green-300">Alert Threshold</label>
                     <div class="flex items-center gap-2">
                         <input type="number" id="zThreshold" value="3.5" step="0.5" class="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-white">
                     </div>
@@ -132,6 +144,20 @@
 
         // --- MATH UTILITIES (The brains) ---
         
+        // Calculate Mean
+        function getMean(values) {
+            if (values.length === 0) return 0;
+            return values.reduce((sum, val) => sum + val, 0) / values.length;
+        }
+
+        // Calculate Standard Deviation
+        function getStdDev(values, mean) {
+            if (values.length === 0) return 0;
+            const squareDiffs = values.map(value => Math.pow(value - mean, 2));
+            const avgSquareDiff = getMean(squareDiffs);
+            return Math.sqrt(avgSquareDiff);
+        }
+        
         // Calculate Median
         function getMedian(values) {
             if(values.length === 0) return 0;
@@ -147,8 +173,10 @@
             return getMedian(deviations);
         }
 
-        // --- DATA GENERATION ---
-        function generateData() {
+        // --- CORE LOGIC ---
+
+        // 1. Generate Raw Data (Independent of Anomaly Method)
+        function generateRawData() {
             const trendPercent = parseFloat(document.getElementById('trendSlider').value);
             const anomalyCount = parseInt(document.getElementById('anomalyCountSlider').value);
             const anomalySize = parseFloat(document.getElementById('anomalySizeSlider').value);
@@ -158,63 +186,101 @@
 
             allData = [];
 
-            // 1. Generate Base Data (Normal + Trend)
+            // A. Base Data Loop
             for (let i = 0; i < TOTAL_DAYS; i++) {
                 const currentDate = new Date(startDate);
                 currentDate.setDate(startDate.getDate() + i);
 
-                // Trend Logic: (Total Growth / Total Days) * Current Day
-                // e.g., if trend is 10%, we grow linearly from Base to Base + 10%
+                // Trend Logic
                 const growthFactor = 1 + (trendPercent / 100) * (i / TOTAL_DAYS);
                 
                 // Add Random Noise
                 const noise = (Math.random() - 0.5) * (BASE_NOISE * 2);
                 
                 let value = (BASE_VALUE * growthFactor) + noise;
-
-                // Ensure no negatives for this dataset (CPU/Sales usually aren't negative)
                 value = Math.max(0, value);
 
                 allData.push({
-                    x: currentDate.getTime(), // Timestamp for Chart.js
+                    x: currentDate.getTime(),
                     y: value,
                     isAnomaly: false
                 });
             }
 
-            // 2. Inject Anomalies (The Whales)
+            // B. Inject Large Anomalies (The Whales)
+            // Controlled by the slider
             for (let k = 0; k < anomalyCount; k++) {
-                // Pick a random day
                 const randomIndex = Math.floor(Math.random() * TOTAL_DAYS);
-                
-                // Decide if it's a spike (positive) or drop (negative)
-                // We'll bias towards spikes for visualization clarity
                 const direction = Math.random() > 0.2 ? 1 : -1; 
-                
-                // Apply the "Whale" factor
                 allData[randomIndex].y += (BASE_NOISE * anomalySize * direction);
-                allData[randomIndex].isAnomaly = true; // Mark as artificially created anomaly
+                allData[randomIndex].isAnomaly = true;
             }
 
-            // 3. Detect Anomalies (Using Modified Z-Score)
-            // We recalculate this every time to color the chart correctly
-            const values = allData.map(d => d.y);
-            const median = getMedian(values);
-            const mad = getMAD(values, median);
+            // C. Inject Small "Burnt Toast" Anomalies (NEW)
+            // These are fixed at 4-6x size to sit right on the threshold line.
+            // These demonstrate the masking effect best.
+            const smallAnomalyCount = 10;
+            for (let j = 0; j < smallAnomalyCount; j++) {
+                const randomIndex = Math.floor(Math.random() * TOTAL_DAYS);
+                const direction = Math.random() > 0.5 ? 1 : -1;
+                // Multiplier 4x - 6x (Smaller than the whales, but statistically significant)
+                const multiplier = 4 + Math.random() * 2; 
+                allData[randomIndex].y += (BASE_NOISE * multiplier * direction);
+            }
+
+            // After generating raw numbers, calculate the scores immediately
+            applyDetectionMethod();
+        }
+
+        // 2. Apply Detection Logic (Runs on existing data)
+        function applyDetectionMethod() {
+            const method = document.getElementById('detectionMethod').value;
             const threshold = parseFloat(document.getElementById('zThreshold').value);
-            const consistencyConstant = 0.6745;
+            const values = allData.map(d => d.y);
+            
+            let stats = {};
+
+            if (method === 'standard') {
+                stats.mean = getMean(values);
+                stats.stdDev = getStdDev(values, stats.mean);
+            } else {
+                stats.median = getMedian(values);
+                stats.mad = getMAD(values, stats.median);
+                stats.constant = 0.6745;
+            }
 
             allData.forEach(point => {
-                // Modified Z-Score Formula
-                let modZ = 0;
-                if (mad !== 0) {
-                     modZ = (consistencyConstant * (point.y - median)) / mad;
+                let score = 0;
+
+                if (method === 'standard') {
+                    if (stats.stdDev !== 0) {
+                        score = (point.y - stats.mean) / stats.stdDev;
+                    }
+                } else {
+                    if (stats.mad !== 0) {
+                        score = (stats.constant * (point.y - stats.median)) / stats.mad;
+                    }
                 }
-                // Store the score for visualization
-                point.modZ = Math.abs(modZ); 
-                // Determine color based on threshold (Manual Alerting Logic)
-                point.color = point.modZ > threshold ? '#ef4444' : '#3b82f6'; // Red if anomaly, Blue if normal
+
+                // Store the score
+                point.zScore = Math.abs(score); 
+                // Color Logic
+                point.color = point.zScore > threshold ? '#ef4444' : '#3b82f6';
             });
+
+            // Update chart without regenerating slider
+            if(chartInstance) {
+                // Check if slider is initialized before accessing it
+                if (dateSlider && dateSlider.noUiSlider) {
+                    const sliderRange = dateSlider.noUiSlider.get();
+                    if(sliderRange) {
+                        updateChart(Math.round(sliderRange[0]), Math.round(sliderRange[1]));
+                    }
+                } else {
+                    // If slider not ready (initial load), show full range
+                    updateChart(0, allData.length);
+                }
+            }
         }
 
         // --- CHARTING ---
@@ -222,19 +288,17 @@
             const ctx = document.getElementById('mainChart').getContext('2d');
             
             chartInstance = new Chart(ctx, {
-                type: 'scatter', // Scatter allows precise point coloring
+                type: 'scatter', 
                 data: {
                     datasets: [{
                         label: 'Server CPU Load',
-                        data: [], // Will be populated
+                        data: [],
                         backgroundColor: (ctx) => {
-                            // Dynamic coloring based on Z-Score Threshold
                             const raw = ctx.raw;
                             return raw ? raw.color : '#3b82f6'; 
                         },
                         pointRadius: (ctx) => {
                             const raw = ctx.raw;
-                            // Make anomalies slightly bigger
                             return raw && raw.color === '#ef4444' ? 6 : 3;
                         }
                     }]
@@ -242,45 +306,35 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    animation: false,
                     scales: {
                         x: {
                             type: 'time',
-                            time: {
-                                unit: 'month'
-                            },
-                            grid: {
-                                color: '#334155'
-                            },
-                            ticks: {
-                                color: '#94a3b8'
-                            }
+                            time: { unit: 'month' },
+                            grid: { color: '#334155' },
+                            ticks: { color: '#94a3b8' }
                         },
                         y: {
                             beginAtZero: true,
-                            grid: {
-                                color: '#334155'
-                            },
-                            ticks: {
-                                color: '#94a3b8'
-                            },
-                            title: {
-                                display: true,
-                                text: 'CPU Load (%)',
-                                color: '#94a3b8'
-                            }
+                            grid: { color: '#334155' },
+                            ticks: { color: '#94a3b8' },
+                            title: { display: true, text: 'CPU Load (%)', color: '#94a3b8' }
                         }
                     },
                     plugins: {
-                        legend: {
-                            display: false
-                        },
+                        legend: { display: false },
                         tooltip: {
                             callbacks: {
                                 label: function(context) {
                                     const point = context.raw;
+                                    const method = document.getElementById('detectionMethod').value;
+                                    const labelType = method === 'standard' ? 'Std Z' : 'Mod Z';
+                                    
                                     let label = `Value: ${point.y.toFixed(2)}`;
-                                    if(point.modZ > parseFloat(document.getElementById('zThreshold').value)) {
-                                        label += ` (ANOMALY! Z: ${point.modZ.toFixed(2)})`;
+                                    label += ` | ${labelType}: ${point.zScore.toFixed(2)}`;
+                                    
+                                    if(point.zScore > parseFloat(document.getElementById('zThreshold').value)) {
+                                        label += ` (ALERT!)`;
                                     }
                                     return label;
                                 }
@@ -292,9 +346,7 @@
         }
 
         function updateChart(startIndex, endIndex) {
-            // Filter data based on slider indices
             const slicedData = allData.slice(startIndex, endIndex);
-            
             chartInstance.data.datasets[0].data = slicedData;
             chartInstance.update();
         }
@@ -302,70 +354,61 @@
         // --- SLIDER LOGIC ---
         function initSlider() {
             noUiSlider.create(dateSlider, {
-                start: [0, TOTAL_DAYS], // Handles at start and end
-                connect: true, // Color the bar between handles
-                range: {
-                    'min': 0,
-                    'max': TOTAL_DAYS
-                },
-                step: 1, // Move by 1 day
-                behaviour: 'drag', // Allow dragging the whole bar
+                start: [0, TOTAL_DAYS],
+                connect: true,
+                range: { 'min': 0, 'max': TOTAL_DAYS },
+                step: 1,
+                behaviour: 'drag',
             });
 
-            // Event: Update Chart when slider moves
             dateSlider.noUiSlider.on('update', function (values, handle) {
                 const startIndex = Math.round(values[0]);
                 const endIndex = Math.round(values[1]);
                 
-                // Update Date Display Text
-                // Safety check for empty data array initialization
                 if(allData.length > 0) {
                     const startTs = allData[Math.min(startIndex, allData.length-1)].x;
-                    // Fix for end index overflow on max
                     const endTs = allData[Math.min(endIndex, allData.length-1) || 0].x; 
-                    
                     document.getElementById('dateStartDisplay').innerText = new Date(startTs).toLocaleDateString();
                     document.getElementById('dateEndDisplay').innerText = new Date(endTs).toLocaleDateString();
                 }
-
                 updateChart(startIndex, endIndex);
             });
         }
 
         // --- EVENT LISTENERS ---
-        document.getElementById('trendSlider').addEventListener('input', (e) => {
-            document.getElementById('trendValue').innerText = e.target.value + '%';
+        // UI Value Updates
+        document.getElementById('trendSlider').addEventListener('input', (e) => document.getElementById('trendValue').innerText = e.target.value + '%');
+        document.getElementById('anomalyCountSlider').addEventListener('input', (e) => document.getElementById('anomalyCountValue').innerText = e.target.value);
+        document.getElementById('anomalySizeSlider').addEventListener('input', (e) => document.getElementById('anomalySizeValue').innerText = e.target.value + 'x');
+
+        // Method Switch Description
+        document.getElementById('detectionMethod').addEventListener('change', (e) => {
+            const desc = document.getElementById('methodDesc');
+            if(e.target.value === 'standard') {
+                desc.innerHTML = `Uses <strong>Mean & StdDev</strong>. <span class="text-red-400">Warning:</span> A large "Whale" will inflate the StdDev, causing smaller anomalies to be ignored (False Negatives).`;
+            } else {
+                desc.innerHTML = `Uses <strong>Median & MAD</strong>. Highly resistant to "Whales." Ideal for messy real-world data.`;
+            }
+            // Just apply the math to existing data, do NOT regenerate raw values
+            applyDetectionMethod();
         });
 
-        document.getElementById('anomalyCountSlider').addEventListener('input', (e) => {
-            document.getElementById('anomalyCountValue').innerText = e.target.value;
-        });
-
-        document.getElementById('anomalySizeSlider').addEventListener('input', (e) => {
-            document.getElementById('anomalySizeValue').innerText = e.target.value + 'x';
-        });
-
-        // Regenerate everything
+        // Regenerate everything (New Data + New Math)
         document.getElementById('regenerateBtn').addEventListener('click', () => {
-            generateData();
-            // Reset slider to full range visually, or just update chart with current slider pos
-            const sliderRange = dateSlider.noUiSlider.get();
-            updateChart(Math.round(sliderRange[0]), Math.round(sliderRange[1]));
+            generateRawData();
+            // Reset visual slider position only on hard regenerate if desired, 
+            // but usually keeping current zoom is nicer. We'll refresh chart via the loop.
         });
         
-        // Update coloring if threshold changes without regenerating data
+        // Threshold Update (Just re-apply math/color)
         document.getElementById('zThreshold').addEventListener('input', () => {
-            const threshold = parseFloat(document.getElementById('zThreshold').value);
-            allData.forEach(point => {
-                point.color = point.modZ > threshold ? '#ef4444' : '#3b82f6';
-            });
-            chartInstance.update();
+            applyDetectionMethod();
         });
 
         // --- INITIALIZATION ---
         initChart();
-        generateData(); // Create initial dataset
-        initSlider(); // Create slider (which triggers the first chart update)
+        generateRawData(); // This also calls applyDetectionMethod()
+        initSlider();
 
     </script>
 </body>
